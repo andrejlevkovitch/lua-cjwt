@@ -21,3 +21,6 @@ otherwise return nil and error string. `headers` and `claims` must be a lua tabl
 - `cjwt.decode(token [, public_key])` - if public_key is set, then also verify
 the token. Return `headers` and `claims` as lua tables in case of success,
 otherwise return `nil` and error message as string
+
+
+Also see [example](example/a.lua)
