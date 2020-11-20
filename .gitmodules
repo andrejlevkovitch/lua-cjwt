@@ -1,0 +1,6 @@
+[submodule "third-party/libjwt"]
+	path = third-party/libjwt
+	url = https://github.com/andrejlevkovitch/libjwt.git
+[submodule "third-party/jansson"]
+	path = third-party/jansson
+	url = https://github.com/akheron/jansson.git
