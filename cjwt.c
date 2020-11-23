@@ -8,28 +8,28 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define OUTPUT
 
-#define DEAD_BEAF (void *)0xdeadbeaf
-
-
-#define CHECK_JWT_ERROR(val)                                                   \
-  {                                                                            \
-    int err = val;                                                             \
-    if (err) {                                                                 \
-      const char *err_message = strerror(err);                                 \
-      lua_pushnil(state);                                                      \
-      lua_pushstring(state, err_message);                                      \
-      count = 2;                                                               \
-      goto final;                                                              \
-    }                                                                          \
-  }
+#define DEAD_BEAF(ptr) ptr = (void *)0xdeadbeaf
 
 
-static void json_object_to_table(const json_t *json, lua_State *state);
-static void json_array_to_table(const json_t *json, lua_State *state);
+/**\
+ * Push decoded json to lua stack as table
+ */
+static void json_object_to_table(lua_State *state, const json_t *json);
+/**\
+ * Same as json_object_to_table, but works with arrays
+ */
+static void json_array_to_table(lua_State *state, const json_t *json);
 
-static void table_to_json_object(json_t *json, lua_State *state);
-static void table_to_json_array(json_t *json, lua_State *state);
+/**\
+ * Get table from top of stack and put data from it to json_t object
+ */
+static void table_to_json_object(lua_State *state, OUTPUT json_t *json);
+/**\
+ * Same as table_to_json_object but works with arrays
+ */
+static void table_to_json_array(lua_State *state, OUTPUT json_t *json);
 
 
 /**
@@ -61,20 +61,51 @@ static int lua_decode_jwt(lua_State *state) {
   }
 
 
-  // iterate over header and grants and push it to lua tables
-  const json_t *headers = jwt_get_headers(jwt);
-  const json_t *grants  = jwt_get_grants(jwt);
+  // XXX after successful decoding jwt token we can be confident, that we got
+  // valid json objects in headers and grants
+  char *headers_json = jwt_get_headers_json(jwt, NULL);
+  char *grants_json  = jwt_get_grants_json(jwt, NULL);
+
+  json_t *headers = json_loads(headers_json, 0, NULL);
+  json_t *grants  = json_loads(grants_json, 0, NULL);
+
 
   // header
-  json_object_to_table(headers, state);
+  json_object_to_table(state, headers);
 
   // claim
-  json_object_to_table(grants, state);
+  json_object_to_table(state, grants);
+
+
+  json_decref(headers);
+  json_decref(grants);
+
+  jwt_free_str(headers_json);
+  jwt_free_str(grants_json);
 
   jwt_free(jwt);
+
+  DEAD_BEAF(headers);
+  DEAD_BEAF(grants);
+  DEAD_BEAF(headers_json);
+  DEAD_BEAF(grants_json);
+  DEAD_BEAF(jwt);
+
   return 2;
 }
 
+
+#define CHECK_JWT_ERROR(val)                                                   \
+  {                                                                            \
+    int err = val;                                                             \
+    if (err) {                                                                 \
+      const char *err_message = strerror(err);                                 \
+      lua_pushnil(state);                                                      \
+      lua_pushstring(state, err_message);                                      \
+      count = 2;                                                               \
+      goto final;                                                              \
+    }                                                                          \
+  }
 
 /**
  * Encode jwt token. Required 3 arguments: header and claim as tables, and
@@ -82,9 +113,8 @@ static int lua_decode_jwt(lua_State *state) {
  * string in case of error
  */
 static int lua_encode_jwt(lua_State *state) {
-  if ((lua_istable(state, 1) && lua_istable(state, 2)) == 0) {
-    luaL_error(state, "invalid header or claim");
-  }
+  luaL_checktype(state, 1, LUA_TTABLE);
+  luaL_checktype(state, 2, LUA_TTABLE);
 
   size_t               key_length = 0;
   const unsigned char *private_key =
@@ -94,17 +124,21 @@ static int lua_encode_jwt(lua_State *state) {
   lua_getfield(state, 1, "alg");
   const char *alg = lua_tostring(state, -1);
   if (alg == NULL) {
-    luaL_error(state, "algorithm doesn't set");
+    lua_pushnil(state);
+    lua_pushstring(state, "algorithm doesn't set");
+    return 2;
   }
 
 
   int count = 0;
 
 
-  json_t *j_header = NULL;
-  json_t *j_claim  = NULL;
-  jwt_t * jwt      = NULL;
-  char *  token    = NULL;
+  json_t *headers      = NULL;
+  json_t *grants       = NULL;
+  jwt_t * jwt          = NULL;
+  char *  headers_json = NULL;
+  char *  grants_json  = NULL;
+  char *  token        = NULL;
 
   jwt_alg_t jwt_alg = jwt_str_alg(alg);
   if (jwt_alg == JWT_ALG_INVAL) {
@@ -116,28 +150,25 @@ static int lua_encode_jwt(lua_State *state) {
   }
 
 
-  j_header = json_object();
-  j_claim  = json_object();
-  if (j_header == NULL || j_claim == NULL) {
-    lua_pushnil(state);
-    lua_pushstring(state, "allocate memory error");
-
-    count = 2;
-    goto final;
-  }
+  headers = json_object();
+  grants  = json_object();
 
   lua_pushvalue(state, 1);
-  table_to_json_object(j_header, state);
+  table_to_json_object(state, headers);
   lua_pushvalue(state, 2);
-  table_to_json_object(j_claim, state);
+  table_to_json_object(state, grants);
+
+
+  headers_json = json_dumps(headers, JSON_COMPACT | JSON_ENSURE_ASCII);
+  grants_json  = json_dumps(grants, JSON_COMPACT | JSON_ENSURE_ASCII);
 
 
   CHECK_JWT_ERROR(jwt_new(&jwt));
 
   CHECK_JWT_ERROR(jwt_set_alg(jwt, jwt_alg, private_key, key_length));
 
-  CHECK_JWT_ERROR(jwt_add_headers(jwt, j_header));
-  CHECK_JWT_ERROR(jwt_add_grants(jwt, j_claim));
+  CHECK_JWT_ERROR(jwt_add_headers_json(jwt, headers_json));
+  CHECK_JWT_ERROR(jwt_add_grants_json(jwt, grants_json));
 
 
   token = jwt_encode_str(jwt);
@@ -158,8 +189,19 @@ final:
   jwt_free_str(token);
   jwt_free(jwt);
 
-  json_decref(j_header);
-  json_decref(j_claim);
+  free(headers_json);
+  free(grants_json);
+
+  json_decref(headers);
+  json_decref(grants);
+
+  DEAD_BEAF(token);
+  DEAD_BEAF(jwt);
+  DEAD_BEAF(headers_json);
+  DEAD_BEAF(grants_json);
+  DEAD_BEAF(headers);
+  DEAD_BEAF(grants);
+
   return count;
 }
 
@@ -177,7 +219,7 @@ int luaopen_cjwt(lua_State *state) {
 ///////////////////////////////////////////////////////////////////////////////
 
 
-static void json_object_to_table(const json_t *json, lua_State *state) {
+static void json_object_to_table(lua_State *state, const json_t *json) {
   lua_newtable(state);
 
   json_t *json_ = (json_t *)json; // XXX need for getting iterator. We doesn't
@@ -206,11 +248,11 @@ static void json_object_to_table(const json_t *json, lua_State *state) {
       lua_setfield(state, -2, key);
     } break;
     case JSON_OBJECT:
-      json_object_to_table(val, state);
+      json_object_to_table(state, val);
       lua_setfield(state, -2, key);
       break;
     case JSON_ARRAY:
-      json_array_to_table(val, state);
+      json_array_to_table(state, val);
       lua_setfield(state, -2, key);
     case JSON_NULL:
       // does nothing
@@ -219,7 +261,7 @@ static void json_object_to_table(const json_t *json, lua_State *state) {
   }
 }
 
-static void json_array_to_table(const json_t *json, lua_State *state) {
+static void json_array_to_table(lua_State *state, const json_t *json) {
   lua_newtable(state);
 
   size_t  index;
@@ -253,12 +295,12 @@ static void json_array_to_table(const json_t *json, lua_State *state) {
     } break;
     case JSON_OBJECT:
       lua_pushnumber(state, lua_index);
-      json_object_to_table(val, state);
+      json_object_to_table(state, val);
       lua_settable(state, -3);
       break;
     case JSON_ARRAY:
       lua_pushnumber(state, lua_index);
-      json_array_to_table(val, state);
+      json_array_to_table(state, val);
       lua_settable(state, -3);
     case JSON_NULL:
       // does nothing
@@ -272,7 +314,7 @@ static void json_array_to_table(const json_t *json, lua_State *state) {
  * Convert lua table to json object. Note that converted table must be on top of
  * stack
  */
-static void table_to_json_object(json_t *json, lua_State *state) {
+static void table_to_json_object(lua_State *state, OUTPUT json_t *json) {
   lua_pushnil(state);
   while (lua_next(state, -2) != 0) {
     const char *key = luaL_checkstring(state, -2);
@@ -295,10 +337,10 @@ static void table_to_json_object(json_t *json, lua_State *state) {
       json_t *nested = NULL;
       if (len == 0) { // then table encode to object
         nested = json_object();
-        table_to_json_object(nested, state);
+        table_to_json_object(state, nested);
       } else { // then table encode to array
         nested = json_array();
-        table_to_json_array(nested, state);
+        table_to_json_array(state, nested);
       }
 
       if (nested == NULL) {
@@ -318,7 +360,7 @@ static void table_to_json_object(json_t *json, lua_State *state) {
 /**
  * Same as table_to_json_object, but encode to array
  */
-static void table_to_json_array(json_t *json, lua_State *state) {
+static void table_to_json_array(lua_State *state, OUTPUT json_t *json) {
   lua_pushnil(state);
   while (lua_next(state, -2) != 0) {
     switch (lua_type(state, -1)) {
@@ -339,10 +381,10 @@ static void table_to_json_array(json_t *json, lua_State *state) {
       json_t *nested = NULL;
       if (len == 0) { // then table encode to object
         nested = json_object();
-        table_to_json_object(nested, state);
+        table_to_json_object(state, nested);
       } else { // then table encode to array
         nested = json_array();
-        table_to_json_array(nested, state);
+        table_to_json_array(state, nested);
       }
 
       if (nested == NULL) {
